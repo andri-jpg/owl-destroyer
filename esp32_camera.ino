@@ -1,60 +1,29 @@
-/* Edge Impulse Arduino examples
- * Copyright (c) 2022 EdgeImpulse Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
-
-// These sketches are tested with 2.0.4 ESP32 Arduino Core
-// https://github.com/espressif/arduino-esp32/releases/tag/2.0.4
-
-/* Includes ---------------------------------------------------------------- */
+#define BLYNK_TEMPLATE_ID "TMPL6rjM5A_-h"
+#define BLYNK_TEMPLATE_NAME "owldtc"
 #include <andri12-project-1_inferencing.h>
 #include "edge-impulse-sdk/dsp/image/image.hpp"
-
+#include <BlynkSimpleEsp32.h>
+#include <base64.h>
 #include "esp_camera.h"
+#include <NewPing.h>
+#include <FS.h>
+#include <SPIFFS.h>
+#include <WiFi.h>
+#include <WebServer.h>
 
-// Select camera model - find more camera models in camera_pins.h file here
-// https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Camera/CameraWebServer/camera_pins.h
+// Inisialisasi WebServer pada port 80
+WebServer server(80);
 
-//#define CAMERA_MODEL_ESP_EYE // Has PSRAM
+#define TRIGGER_PIN 13 // Pin untuk trigger ultrasonik
+#define ECHO_PIN 12    // Pin untuk echo ultrasonik
+#define MAX_DISTANCE 200 // Maksimal jarak untuk pengukuran (dalam cm)
+
+// Inisialisasi sensor ultrasonik
+NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
+
 #define CAMERA_MODEL_AI_THINKER // Has PSRAM
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-#define PWDN_GPIO_NUM    -1
-#define RESET_GPIO_NUM   -1
-#define XCLK_GPIO_NUM    4
-#define SIOD_GPIO_NUM    18
-#define SIOC_GPIO_NUM    23
-
-#define Y9_GPIO_NUM      36
-#define Y8_GPIO_NUM      37
-#define Y7_GPIO_NUM      38
-#define Y6_GPIO_NUM      39
-#define Y5_GPIO_NUM      35
-#define Y4_GPIO_NUM      14
-#define Y3_GPIO_NUM      13
-#define Y2_GPIO_NUM      34
-#define VSYNC_GPIO_NUM   5
-#define HREF_GPIO_NUM    27
-#define PCLK_GPIO_NUM    25
-
-#elif defined(CAMERA_MODEL_AI_THINKER)
+#if defined(CAMERA_MODEL_AI_THINKER)
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -73,8 +42,12 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 #define LED_PIN           4 
-#define BUZZER_PIN        12
+#define BUZZER_PIN        14
 #define STUN              15
+
+char auth[] = "a9pipoqjHpZ2UT4g3tauecFvT48u0OZu";
+char ssid[] = "rn";
+char pass[] = "ahpepekpepek";
 
 #else
 #error "Camera model not selected"
@@ -89,6 +62,13 @@
 static bool debug_nn = false; // Set this to true to see e.g. features generated from the raw signal
 static bool is_initialised = false;
 uint8_t *snapshot_buf; //points to the output of the capture
+
+BlynkTimer timer; // Deklarasi BlynkTimer
+BlynkTimer streamingTimer; // Timer untuk streaming
+int streamingTimerID = -1; // ID untuk streaming timer
+
+// Variabel untuk melacak mode saat ini
+bool isStreamingMode = false;
 
 static camera_config_t camera_config = {
     .pin_pwdn = PWDN_GPIO_NUM,
@@ -109,16 +89,14 @@ static camera_config_t camera_config = {
     .pin_href = HREF_GPIO_NUM,
     .pin_pclk = PCLK_GPIO_NUM,
 
-    //XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
     .xclk_freq_hz = 20000000,
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
 
-    .pixel_format = PIXFORMAT_JPEG, //YUV422,GRAYSCALE,RGB565,JPEG
-    .frame_size = FRAMESIZE_QVGA,    //QQVGA-UXGA Do not use sizes above QVGA when not JPEG
-
-    .jpeg_quality = 12, //0-63 lower number means higher quality
-    .fb_count = 1,       //if more than one, i2s runs in continuous mode. Use only with JPEG
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size = FRAMESIZE_QVGA,
+    .jpeg_quality = 12,
+    .fb_count = 1,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
 };
@@ -126,7 +104,7 @@ static camera_config_t camera_config = {
 /* Function definitions ------------------------------------------------------- */
 bool ei_camera_init(void);
 void ei_camera_deinit(void);
-bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf) ;
+bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf);
 
 /**
 * @brief      Arduino setup function
@@ -138,13 +116,14 @@ void setup()
 
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW); // Ensure buzzer is off initially
-     pinMode(STUN, OUTPUT);
+    pinMode(STUN, OUTPUT);
     digitalWrite(STUN, HIGH);
 
     Serial.begin(115200);
-    //comment out the below line to start inference immediately after upload
     while (!Serial);
+    Blynk.begin(auth, ssid, pass);
     Serial.println("Edge Impulse Inferencing Demo");
+
     if (ei_camera_init() == false) {
         ei_printf("Failed to initialize Camera!\r\n");
     }
@@ -153,6 +132,15 @@ void setup()
         digitalWrite(LED_PIN, LOW); 
     }
 
+    if (!SPIFFS.begin(true)) {
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+
+    timer.setInterval(500L, sendUltrasonicDistance); // Kirim data jarak setiap 1 detik
+
+    setupWiFi();
+    startCameraServer();
 }
 
 /**
@@ -162,11 +150,22 @@ void setup()
 */
 void loop()
 {
-    // Interval deteksi, delay 2 detik antara setiap deteksi
+    Blynk.run();
+    timer.run();
+    streamingTimer.run();
+    server.handleClient();
+    delay(1);
+
+    if (!isStreamingMode) {
+        handle_inferencing();
+    }
+}
+
+void handle_inferencing() {
+    if (isStreamingMode) return;
 
     snapshot_buf = (uint8_t*)malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * EI_CAMERA_FRAME_BYTE_SIZE);
 
-    // check if allocation was successful
     if(snapshot_buf == nullptr) {
         ei_printf("ERR: Failed to allocate snapshot buffer!\n");
         return;
@@ -182,7 +181,6 @@ void loop()
         return;
     }
 
-    // Run the classifier
     ei_impulse_result_t result = { 0 };
 
     EI_IMPULSE_ERROR err = run_classifier(&signal, &result, debug_nn);
@@ -191,28 +189,18 @@ void loop()
         return;
     }
 
-    // print the predictions
     ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
-                result.timing.dsp, result.timing.classification, result.timing.anomaly);
+              result.timing.dsp, result.timing.classification, result.timing.anomaly);
 
-#if EI_CLASSIFIER_OBJECT_DETECTION == 1
+    #if EI_CLASSIFIER_OBJECT_DETECTION == 1
     ei_printf("Object detection bounding boxes:\r\n");
     for (uint32_t i = 0; i < result.bounding_boxes_count; i++) {
         ei_impulse_result_bounding_box_t bb = result.bounding_boxes[i];
-        if (bb.value == 0) {
-            continue;
-        }
+        if (bb.value == 0) continue;
         ei_printf("  %s (%f) [ x: %u, y: %u, width: %u, height: %u ]\r\n",
-                bb.label,
-                bb.value,
-                bb.x,
-                bb.y,
-                bb.width,
-                bb.height);
+                  bb.label, bb.value, bb.x, bb.y, bb.width, bb.height);
     }
-
-    // Print the prediction results (classification)
-#else
+    #else
     ei_printf("Predictions:\r\n");
     float owl_prediction = 0;
     float nothing_prediction = 1;
@@ -221,7 +209,6 @@ void loop()
         ei_printf("  %s: ", ei_classifier_inferencing_categories[i]);
         ei_printf("%.5f\r\n", result.classification[i].value);
 
-        // Store predictions for owl and nothing
         if (strcmp(ei_classifier_inferencing_categories[i], "owl") == 0) {
             owl_prediction = result.classification[i].value;
         }
@@ -229,121 +216,103 @@ void loop()
             nothing_prediction = result.classification[i].value;
         }
     }
+    String prediction = "Owl: " + String(owl_prediction) + ", Nothing: " + String(nothing_prediction);
+    Blynk.virtualWrite(V2, prediction);
 
-    // Check for the conditions to turn on the buzzer
-    if (owl_prediction > 0.75 && nothing_prediction < 0.4) {
-        // Flash LED three times
+    if (owl_prediction > 0.5 && nothing_prediction < 0.6) {
         for (int i = 0; i < 3; i++) {
             digitalWrite(BUZZER_PIN, HIGH); 
-            delay(100); // LED on for 500 ms
+            delay(100); 
             digitalWrite(BUZZER_PIN, LOW); 
-            delay(100); // LED off for 500 ms
+            delay(100); 
         }
-        digitalWrite(STUN, LOW); // Buzzer on (assuming active LOW)
-        delay(1000); // Buzzer on for 2 seconds
-        digitalWrite(STUN, HIGH); // Buzzer off
+        digitalWrite(STUN, LOW);
+        delay(1000);
+        digitalWrite(STUN, HIGH);
     } else {
-        digitalWrite(STUN, HIGH); // Ensure buzzer is off (assuming active LOW)
+        digitalWrite(STUN, HIGH);
     }
-#endif
+    #endif
 
-    // Print anomaly result (if it exists)
-#if EI_CLASSIFIER_HAS_ANOMALY
+    #if EI_CLASSIFIER_HAS_ANOMALY
     ei_printf("Anomaly prediction: %.3f\r\n", result.anomaly);
-#endif
-
-#if EI_CLASSIFIER_HAS_VISUAL_ANOMALY
-    ei_printf("Visual anomalies:\r\n");
-    for (uint32_t i = 0; i < result.visual_ad_count; i++) {
-        ei_impulse_result_bounding_box_t bb = result.visual_ad_grid_cells[i];
-        if (bb.value == 0) {
-            continue;
-        }
-        ei_printf("  %s (%f) [ x: %u, y: %u, width: %u, height: %u ]\r\n",
-                bb.label,
-                bb.value,
-                bb.x,
-                bb.y,
-                bb.width,
-                bb.height);
-    }
-#endif
+    #endif
 
     free(snapshot_buf);
 }
 
-/**
- * @brief   Setup image sensor & start streaming
- *
- * @retval  false if initialisation failed
- */
-bool ei_camera_init(void) {
+BLYNK_WRITE(V1) {
+    int pinValue = param.asInt();
+    if (pinValue == 1) {
+        handle_mode_switch(true);
+    } else {
+        handle_mode_switch(false);
+    }
+}
 
+BLYNK_WRITE(V4) {
+    int pinValue = param.asInt();
+    if (pinValue == 1) {
+        digitalWrite(LED_PIN, HIGH);
+    } else {
+        digitalWrite(LED_PIN, LOW);
+    }
+}
+
+void sendUltrasonicDistance() {
+    unsigned int uS = sonar.ping();
+    float distanceCM = uS / US_ROUNDTRIP_CM; 
+
+    Serial.print("Distance: ");
+    Serial.print(distanceCM);
+    Serial.println(" cm");
+
+    Blynk.virtualWrite(V3, distanceCM);
+}
+
+bool ei_camera_init(void) {
     if (is_initialised) return true;
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
+    #if defined(CAMERA_MODEL_ESP_EYE)
+    pinMode(13, INPUT_PULLUP);
+    pinMode(14, INPUT_PULLUP);
+    #endif
 
-    //initialize the camera
     esp_err_t err = esp_camera_init(&camera_config);
     if (err != ESP_OK) {
-      Serial.printf("Camera init failed with error 0x%x\n", err);
-      return false;
+        Serial.printf("Camera init failed with error 0x%x\n", err);
+        return false;
     }
 
     sensor_t * s = esp_camera_sensor_get();
-    // initial sensors are flipped vertically and colors are a bit saturated
     if (s->id.PID == OV3660_PID) {
-      s->set_vflip(s, 1); // flip it back
-      s->set_brightness(s, 1); // up the brightness just a bit
-      s->set_saturation(s, 0); // lower the saturation
+        s->set_vflip(s, 1);
+        s->set_brightness(s, 1);
+        s->set_saturation(s, 0);
     }
 
-#if defined(CAMERA_MODEL_M5STACK_WIDE)
+    #if defined(CAMERA_MODEL_M5STACK_WIDE)
     s->set_vflip(s, 1);
     s->set_hmirror(s, 1);
-#elif defined(CAMERA_MODEL_ESP_EYE)
+    #elif defined(CAMERA_MODEL_ESP_EYE)
     s->set_vflip(s, 1);
     s->set_hmirror(s, 1);
     s->set_awb_gain(s, 1);
-#endif
+    #endif
 
     is_initialised = true;
     return true;
 }
 
-/**
- * @brief      Stop streaming of sensor data
- */
 void ei_camera_deinit(void) {
-
-    //deinitialize the camera
     esp_err_t err = esp_camera_deinit();
-
-    if (err != ESP_OK)
-    {
+    if (err != ESP_OK) {
         ei_printf("Camera deinit failed\n");
         return;
     }
-
     is_initialised = false;
-    return;
 }
 
-
-/**
- * @brief      Capture, rescale and crop image
- *
- * @param[in]  img_width     width of output image
- * @param[in]  img_height    height of output image
- * @param[in]  out_buf       pointer to store output image, NULL may be used
- *                           if ei_camera_frame_buffer is to be used for capture and resize/cropping.
- *
- * @retval     false if not initialised, image captured, rescaled or cropped failed
- *
- */
 bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf) {
     bool do_resize = false;
 
@@ -359,14 +328,14 @@ bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf
         return false;
     }
 
-   bool converted = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
+    bool converted = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
 
-   esp_camera_fb_return(fb);
+    esp_camera_fb_return(fb);
 
-   if(!converted){
-       ei_printf("Conversion failed\n");
-       return false;
-   }
+    if(!converted){
+        ei_printf("Conversion failed\n");
+        return false;
+    }
 
     if ((img_width != EI_CAMERA_RAW_FRAME_BUFFER_COLS)
         || (img_height != EI_CAMERA_RAW_FRAME_BUFFER_ROWS)) {
@@ -383,31 +352,119 @@ bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf
         img_height);
     }
 
-
     return true;
 }
 
-static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr)
-{
-    // we already have a RGB888 buffer, so recalculate offset into pixel index
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
     size_t pixel_ix = offset * 3;
     size_t pixels_left = length;
     size_t out_ptr_ix = 0;
 
     while (pixels_left != 0) {
-        // Swap BGR to RGB here
-        // due to https://github.com/espressif/esp32-camera/issues/379
         out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix + 2] << 16) + (snapshot_buf[pixel_ix + 1] << 8) + snapshot_buf[pixel_ix];
-
-        // go to the next pixel
         out_ptr_ix++;
         pixel_ix+=3;
         pixels_left--;
     }
-    // and done!
     return 0;
 }
 
-#if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_CAMERA
-#error "Invalid model for current sensor"
-#endif
+void handle_mode_switch(bool streamingMode) {
+    isStreamingMode = streamingMode;
+    if (isStreamingMode) {
+        digitalWrite(LED_PIN, HIGH); 
+        streamingTimerID = streamingTimer.setInterval(33L, handle_jpg_stream); // Jalankan setiap 33ms (~30fps)
+    } else {
+        digitalWrite(LED_PIN, LOW);
+        if (streamingTimerID != -1) {
+            streamingTimer.deleteTimer(streamingTimerID); // Hentikan timer streaming
+            streamingTimerID = -1;
+        }
+    }
+}
+
+void handle_jpg_stream() {
+    const char* HEADER = "HTTP/1.1 200 OK\r\n" \
+                         "Access-Control-Allow-Origin: *\r\n" \
+                         "Content-Type: multipart/x-mixed-replace; boundary=123456789000000000000987654321\r\n";
+    const char* BOUNDARY = "\r\n--123456789000000000000987654321\r\n";
+    const char* CTNTTYPE = "Content-Type: image/jpeg\r\nContent-Length: ";
+    char buf[32];
+    int s;
+
+    WiFiClient client = server.client();
+
+    if (!client.connected()) return;
+
+    client.write(HEADER, strlen(HEADER));
+    client.write(BOUNDARY, strlen(BOUNDARY));
+
+    while (isStreamingMode && client.connected()) {
+        camera_fb_t * fb = esp_camera_fb_get();
+        if (!fb) {
+            Serial.println("Camera capture failed");
+            return;
+        }
+
+        if (fb->format != PIXFORMAT_JPEG) {
+            uint8_t* _jpg_buf = NULL;
+            size_t _jpg_buf_len = 0;
+            bool converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
+            if (!converted) {
+                Serial.println("JPEG compression failed");
+                esp_camera_fb_return(fb);
+                return;
+            }
+            s = _jpg_buf_len;
+            client.write(CTNTTYPE, strlen(CTNTTYPE));
+            sprintf(buf, "%d\r\n\r\n", s);
+            client.write(buf, strlen(buf));
+            client.write((char*)_jpg_buf, s);
+            free(_jpg_buf);
+        } else {
+            s = fb->len;
+            client.write(CTNTTYPE, strlen(CTNTTYPE));
+            sprintf(buf, "%d\r\n\r\n", s);
+            client.write(buf, strlen(buf));
+            client.write((char*)fb->buf, s);
+        }
+        client.write(BOUNDARY, strlen(BOUNDARY));
+        esp_camera_fb_return(fb);
+    }
+    handle_mode_switch(false); // Matikan mode streaming jika klien terputus
+}
+
+void startCameraServer() {
+    server.on("/", HTTP_GET, []() {
+        server.send(200, "text/html", "<html><body><img src=\"/stream\" /></body></html>");
+    });
+
+    server.on("/stream", HTTP_GET, []() {
+    });
+
+    server.on("/switch_mode", HTTP_GET, []() {
+        handle_mode_switch(!isStreamingMode);
+        server.send(200, "text/plain", "Mode switched");
+    });
+
+    server.begin();  // Memulai server
+    Serial.println("Web server started");
+}
+
+void setupWiFi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, pass);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("");
+    Serial.println("WiFi connected");
+
+    String ipAddress = WiFi.localIP().toString();
+    String streamURL = "http://" + ipAddress + "/stream";
+    Blynk.virtualWrite(V6, ipAddress);
+    Blynk.virtualWrite(V7, streamURL);
+    Serial.println("IP Address: " + ipAddress); 
+    Serial.println("Stream URL: " + streamURL); 
+}
