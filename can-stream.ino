@@ -1,4 +1,4 @@
-#define BLYNK_TEMPLATE_ID "TMPL6rjM5A_-h"
+#define BLYNK_TEMPLATE_ID "**********"
 #define BLYNK_TEMPLATE_NAME "owldtc"
 #include <andri12-project-1_inferencing.h>
 #include "edge-impulse-sdk/dsp/image/image.hpp"
@@ -45,9 +45,9 @@ NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
 #define BUZZER_PIN        14
 #define STUN              15
 
-char auth[] = "a9pipoqjHpZ2UT4g3tauecFvT48u0OZu";
-char ssid[] = "rn";
-char pass[] = "ahpepekpepek";
+char auth[] = "********";
+char ssid[] = "***";
+char pass[] = "*******k";
 
 #else
 #error "Camera model not selected"
