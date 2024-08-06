@@ -45,9 +45,9 @@ NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
 #define BUZZER_PIN        14
 #define STUN              15
 
-char auth[] = "a9pipoqjHpZ2UT4g3tauecFvT48u0OZu";
-char ssid[] = "rn";
-char pass[] = "ahpepekpepek";
+char auth[] = "*********";
+char ssid[] = "****";
+char pass[] = "********";
 
 #else
 #error "Camera model not selected"
