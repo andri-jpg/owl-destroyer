@@ -1,5 +1,5 @@
-#define BLYNK_TEMPLATE_ID "TMPL6rjM5A_-h"
-#define BLYNK_TEMPLATE_NAME "owldtc"
+#define BLYNK_TEMPLATE_ID "T****"
+#define BLYNK_TEMPLATE_NAME "owl****"
 #include <andri12-project-1_inferencing.h>
 #include "edge-impulse-sdk/dsp/image/image.hpp"
 #include <BlynkSimpleEsp32.h>
